@@ -1,46 +1,45 @@
-#include <Arduino.h>
+const int PIN_LM35 = 34;
+const int N = 10; // Cambiar a 1, 10 y 30 para las pruebas
+const unsigned long PERIODO_MUESTREO_MS = 100;
 
-// AP05-AP06 - Parte A: LM35 y media movil.
-constexpr uint8_t PIN_LM35 = 34;
-constexpr uint32_t TS = 100;  // ms
-constexpr size_t N = 10;      // Cambiar a 1, 10 o 30.
-static_assert(N > 0, "N debe ser positivo");
-
-float buffer[N] = {};
-size_t indice = 0, cantidad = 0;
-float suma = 0.0f;
-uint32_t ultimaMuestra = 0;
-
-// Media movil: suma acumulada y reemplazo circular.
-float mediaMovil(float nueva) {
-  if (cantidad == N) {
-    suma -= buffer[indice];  // Retirar la muestra mas antigua.
-  } else {
-    cantidad++;             // Arranque sin promediar ceros.
-  }
-  buffer[indice] = nueva;
-  suma += nueva;
-  indice = (indice + 1) % N;
-  return suma / cantidad;
-}
+float bufferCircular[30]; // Tamaño máximo a usar
+int indice = 0;
+int muestrasValidas = 0;
+unsigned long ultimoMuestreo = 0;
 
 void setup() {
   Serial.begin(115200);
-  analogReadResolution(12);
   analogSetAttenuation(ADC_0db);
-  ultimaMuestra = millis();
+  analogReadMilliVolts(PIN_LM35); // Lectura inicial de estabilización
 }
 
 void loop() {
-  uint32_t ahora = millis();
-  if (ahora - ultimaMuestra >= TS) {
-    ultimaMuestra = ahora;
-    // LM35: 10 mV por grado Celsius.
-    float cruda = analogReadMilliVolts(PIN_LM35) / 10.0f;
-    float filtrada = mediaMovil(cruda);
+  unsigned long ahora = millis();
+  if (ahora - ultimoMuestreo >= PERIODO_MUESTREO_MS) {
+    ultimoMuestreo = ahora;
+
+    // 1. Leer milivoltios y convertir a °C
+    uint32_t mv = analogReadMilliVolts(PIN_LM35);
+    float tempCruda = mv / 10.0f;
+
+    // 2. Guardar en búfer circular
+    bufferCircular[indice] = tempCruda;
+    indice = (indice + 1) % N;
+    if (muestrasValidas < N) {
+      muestrasValidas++;
+    }
+
+    // 3. Calcular media móvil
+    float suma = 0.0f;
+    for (int i = 0; i < muestrasValidas; i++) {
+      suma += bufferCircular[i];
+    }
+    float tempFiltrada = suma / muestrasValidas;
+
+    // 4. Formato exacto para Serial Plotter
     Serial.print("T_cruda:");
-    Serial.print(cruda, 2);
+    Serial.print(tempCruda, 2);
     Serial.print(",T_filtrada:");
-    Serial.println(filtrada, 2);
+    Serial.println(tempFiltrada, 2);
   }
 }
