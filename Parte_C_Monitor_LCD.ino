@@ -1,102 +1,109 @@
-#include <Arduino.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
-#include <stdio.h>
 
-// AP05-AP06 - Parte C: monitor con LCD y alarma.
-constexpr uint8_t PIN_LM35 = 34;
-constexpr uint32_t TS = 100;  // ms
-constexpr size_t N = 10;      // Cambiar a 1, 10 o 30.
-static_assert(N > 0, "N debe ser positivo");
+const int PIN_LM35 = 34;
+const int PIN_LED  = 19;
+const uint8_t DIR_LCD = 0x27; // Cambiar a 0x3F si tu escáner mostró esa dirección
 
-float buffer[N] = {};
-size_t indice = 0, cantidad = 0;
-float suma = 0.0f;
-uint32_t ultimaMuestra = 0;
-constexpr uint8_t PIN_LED = 19;
-constexpr uint8_t LCD_DIR = 0x27;  // Cambiar segun la Parte B.
-constexpr uint32_t TLCD = 500;     // ms
-constexpr float T_ON = 28.0f;
-constexpr float T_OFF = 26.0f;
-static_assert(T_ON > T_OFF, "Umbrales incorrectos");
+const int N = 10;
+const unsigned long PERIODO_MUESTREO_MS = 100;
+const unsigned long PERIODO_LCD_MS      = 500;
 
-LiquidCrystal_I2C lcd(LCD_DIR, 16, 2);
-uint32_t ultimaLCD = 0;
-float filtrada = 0.0f;
-bool alarma = false;
+// Umbrales de histéresis (ajustar a 27.0 / 25.0 si no alcanzas 28 °C)
+const float T_ON  = 28.0f;
+const float T_OFF = 26.0f;
 
-// Caracter personalizado del simbolo de grado (5 x 8).
-uint8_t grado[8] = {0b00110, 0b01001, 0b01001, 0b00110,
-                    0b00000, 0b00000, 0b00000, 0b00000};
+LiquidCrystal_I2C lcd(DIR_LCD, 16, 2);
 
-// Media movil: suma acumulada y reemplazo circular.
-float mediaMovil(float nueva) {
-  if (cantidad == N) {
-    suma -= buffer[indice];  // Retirar la muestra mas antigua.
-  } else {
-    cantidad++;             // Arranque sin promediar ceros.
-  }
-  buffer[indice] = nueva;
-  suma += nueva;
-  indice = (indice + 1) % N;
-  return suma / cantidad;
-}
+// Carácter personalizado para el símbolo de grado (°)
+byte gradoChar[8] = {
+  0b00110,
+  0b01001,
+  0b01001,
+  0b00110,
+  0b00000,
+  0b00000,
+  0b00000,
+  0b00000
+};
 
-void controlarAlarma(float temperatura) {
-  if (!alarma && temperatura >= T_ON) {
-    alarma = true;
-  } else if (alarma && temperatura <= T_OFF) {
-    alarma = false;
-  }
-  digitalWrite(PIN_LED, alarma ? HIGH : LOW);
-}
+float bufferCircular[N];
+int indice = 0;
+int muestrasValidas = 0;
+bool alarmaActiva = false;
 
-void actualizarLCD() {
-  char fila[17];  // 16 caracteres y terminador nulo.
-  // %5.1f asegura un ancho minimo de cinco caracteres.
-  snprintf(fila, sizeof(fila), "Temp:%5.1f", filtrada);
-  lcd.setCursor(0, 0);
-  lcd.print(fila);            // 10 caracteres en el rango del ADC.
-  lcd.write((uint8_t)0);      // Grado personalizado.
-  lcd.print("C    ");        // Completa los 16 caracteres.
-  lcd.setCursor(0, 1);
-  lcd.print(alarma ? "Alarma: SI      " : "Alarma: NO      ");
-}
+unsigned long ultimoMuestreo = 0;
+unsigned long ultimaLcd = 0;
 
 void setup() {
   Serial.begin(115200);
   pinMode(PIN_LED, OUTPUT);
   digitalWrite(PIN_LED, LOW);
-  analogReadResolution(12);
+
   analogSetAttenuation(ADC_0db);
+  analogReadMilliVolts(PIN_LM35);
+
   Wire.begin(21, 22);
-  Wire.setClock(100000);
   lcd.init();
   lcd.backlight();
-  lcd.createChar(0, grado);
-  lcd.setCursor(0, 0);
-  lcd.print("Iniciando...    ");
-  lcd.setCursor(0, 1);
-  lcd.print("Alarma: NO      ");
-  ultimaMuestra = ultimaLCD = millis();
+  lcd.createChar(0, gradoChar);
 }
 
 void loop() {
-  uint32_t ahora = millis();
-  if (ahora - ultimaMuestra >= TS) {
-    ultimaMuestra = ahora;
-    float cruda = analogReadMilliVolts(PIN_LM35) / 10.0f;
-    filtrada = mediaMovil(cruda);
-    controlarAlarma(filtrada);
+  unsigned long ahora = millis();
+
+  // Muestreo y filtro cada 100 ms
+  if (ahora - ultimoMuestreo >= PERIODO_MUESTREO_MS) {
+    ultimoMuestreo = ahora;
+
+    uint32_t mv = analogReadMilliVolts(PIN_LM35);
+    float tempCruda = mv / 10.0f;
+
+    bufferCircular[indice] = tempCruda;
+    indice = (indice + 1) % N;
+    if (muestrasValidas < N) {
+      muestrasValidas++;
+    }
+
+    float suma = 0.0f;
+    for (int i = 0; i < muestrasValidas; i++) {
+      suma += bufferCircular[i];
+    }
+    float tempFiltrada = suma / muestrasValidas;
+
+    // Lógica de histéresis
+    if (!alarmaActiva && tempFiltrada >= T_ON) {
+      alarmaActiva = true;
+    } else if (alarmaActiva && tempFiltrada <= T_OFF) {
+      alarmaActiva = false;
+    }
+
+    digitalWrite(PIN_LED, alarmaActiva ? HIGH : LOW);
+
+    // Salida serie para monitoreo
     Serial.print("T_cruda:");
-    Serial.print(cruda, 2);
+    Serial.print(tempCruda, 2);
     Serial.print(",T_filtrada:");
-    Serial.print(filtrada, 2);
+    Serial.print(tempFiltrada, 2);
     Serial.print(",Alarma:");
-    Serial.println(alarma ? 1 : 0);
-  }
-  if (cantidad > 0 && ahora - ultimaLCD >= TLCD) {
-    ultimaLCD = ahora;
-    actualizarLCD();
+    Serial.println(alarmaActiva ? 1 : 0);
+
+    // Actualizar LCD cada 500 ms sin lcd.clear()
+    if (ahora - ultimaLcd >= PERIODO_LCD_MS) {
+      ultimaLcd = ahora;
+
+      // Fila 0: Temp:XX.X°C
+      lcd.setCursor(0, 0);
+      lcd.print("Temp:");
+      lcd.print(tempFiltrada, 1);
+      lcd.write((uint8_t)0);
+      lcd.print("C   "); // Espacios para borrar residuos previos
+
+      // Fila 1: Alarma:SI o Alarma:NO
+      lcd.setCursor(0, 1);
+      lcd.print("Alarma:");
+      lcd.print(alarmaActiva ? "SI" : "NO");
+      lcd.print("     "); // Espacios para limpiar restos anteriores
+    }
   }
 }
